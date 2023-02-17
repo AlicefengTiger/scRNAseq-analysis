@@ -1,0 +1,320 @@
+---
+title: "scRNAseq analysis for FDA project"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: paper
+    df_print: kable
+    toc: yes
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+
+For 2023 FDA paper\*\*\*\*\*
+
+### User inputs
+
+```{r}
+#loads required libraries
+library(Seurat)
+library(cowplot)
+library(sctransform)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+```
+
+### Load H1-H9 data, separate H9 data based on sex annotation and then run H9 QC
+
+```{r}
+IN_SERVER_ADDRESS <-"."
+
+IN_DATA_DIR <-file.path(IN_SERVER_ADDRESS,"../")
+
+# annotation file to separate H1 from H9 based on sex genes
+IN_BULKSEX <-file.path(IN_SERVER_ADDRESS,"/sex_annotation_Bulk_H1_H9.txt")
+
+# folder containng geneliss that you want overlay on cell scatter plot 
+IN_GENELIST_FOLDER <- "."
+
+#dmension reduction method for cell scatte polot. chose from "tsne", "pca", or "umap" 
+IN_DIM_REDUCTION <-"umap" 
+
+# Load the H9 scell dataset
+scell.data <- Read10X(data.dir = IN_DATA_DIR)
+
+# Initialize the Seurat object with the raw (non-normalized data).
+scell <- CreateSeuratObject(counts = scell.data, project = "scell_H9", min.cells = 3, min.features = 200)
+
+#"read.delim" function to read in a delimited text file, specified by the file path "IN_BULKSEX", into a data frame in R. 
+BulkSex <- read.delim(file=IN_BULKSEX, header=TRUE)
+
+#modify the "Cell_Barcode" column in the data frame by "paste" values from BulkSex file to this column
+BulkSex$Cell_Barcode <- paste(sep="",BulkSex$Cell_Barcode,"-1")
+
+#match the cell barcodes in the "Cell_Barcode"
+SexAnnotation <-BulkSex$Sex[match(colnames(scell),paste(BulkSex$Cell_Barcode))]
+
+#create a new column called "SEX", and the value assigned to this column is stored in the "SexAnnotation" variable.
+scell$Sex <- SexAnnotation
+
+#get H9 (female) data, by subseting only the female dataset and remove male dataset (H1).
+scell <- subset(x = scell, subset = Sex %in% "female")
+dim(scell)
+```
+
+### H9 QC
+
+The percentage of reads that map to the mitochondrial genome. The low-quality or dying cells often exhibit extensive mitochondrial contamination. We calculate mitochondrial QC matrics with the `PercentageFeatureSet` function, which calculates the percentage of counts originating from a set of features. We use the est of all genes starting with `MT-` as a set of mitochondrial genes.
+
+Next we filter cells via median-absolute-deviations.
+
+```{r}
+#Calculate the percentage of mitochondrial gene expression in each cell. This code uses the "PercentageFeatureSet" function to calculate the percentage of mitochondrial gene expression in a single-cell RNA sequencing object.
+scell[["percent.mt"]] <- PercentageFeatureSet(object = scell, pattern = "^MT-")
+
+# calculate QC thresholds based on medians and median-absolute-deviations. 
+mtThreshold<- median(scell@meta.data$percent.mt)+ 3*(mad(scell@meta.data$percent.mt))
+featureMaxThreshold<- median(scell@meta.data$nFeature_RNA)+ 3*(mad(scell@meta.data$nFeature_RNA))
+featureMinThreshold<- median(scell@meta.data$nFeature_RNA)- 3*(mad(scell@meta.data$nFeature_RNA))
+
+# Filter cells based on thresholds above
+outlier_list <- scell@meta.data$nFeature_RNA > featureMinThreshold & scell@meta.data$nFeature_RNA < featureMaxThreshold & scell@meta.data$percent.mt < mtThreshold
+scell$outliers <- outlier_list=="FALSE"
+
+#generate QC graphs with cell outliers flagged in BLUE
+v1_H9 <- VlnPlot(object = scell, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "outliers", pt.size = 0.1, split.plot = TRUE )
+plot1_H9 <- FeatureScatter(object = scell, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "outliers") 
+plot2_H9 <- FeatureScatter(object = scell, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "outliers") 
+
+#filter cells that are outliers
+scell <- subset(x = scell, subset = outliers=="FALSE")
+
+#regenerate QC graphs with cell outliers flagged in BLUE (should be none!)
+v2_H9 <- VlnPlot(object = scell, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "outliers", pt.size = 0.1 )
+plot3_H9 <- FeatureScatter(object = scell, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "outliers") 
+plot4_H9 <- FeatureScatter(object = scell, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "outliers") 
+
+#QC graphs - TOP row before filtering outliers, bottom row after filtering
+CombinePlots(plots = list(v1_H9, plot1_H9, plot2_H9, v2_H9, plot3_H9, plot4_H9), ncol=3)
+H9 <- scell
+#View different features in violin plots
+VlnPlot(H9, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+### Load V1 Database
+
+```{r}
+#File location
+IN_DATA_DIR_V1 <-file.path(IN_SERVER_ADDRESS,"../")
+
+IN_DIM_REDUCTION_V1 <-"umap" 
+
+# Load the scell dataset
+scell.data_V1 <- Read10X(data.dir = IN_DATA_DIR_V1)
+
+# Initialize the Seurat object with the raw (non-normalized data).
+scell_V1 <- CreateSeuratObject(counts = scell.data_V1, project = "V1H9", min.cells = 3, min.features = 200)
+```
+
+### V1 QC
+
+```{r}
+#Calculate the percentage of mitochondrial gene expression in each cell. This code uses the "PercentageFeatureSet" function to calculate the percentage of mitochondrial gene expression in a single-cell RNA sequencing object. 
+scell_V1[["percent.mt"]] <- PercentageFeatureSet(object = scell_V1, pattern = "^MT-")
+
+# calculate QC thresholds based on medians and median-absolute-deviations
+mtThreshold_V1<- median(scell_V1@meta.data$percent.mt)+ 3*(mad(scell_V1@meta.data$percent.mt))
+featureMaxThreshold_V1<- median(scell_V1@meta.data$nFeature_RNA)+ 3*(mad(scell_V1@meta.data$nFeature_RNA))
+featureMinThreshold_V1<- median(scell_V1@meta.data$nFeature_RNA)- 3*(mad(scell_V1@meta.data$nFeature_RNA))
+
+# flag outlier cells based on thresholds above
+outlier_list_V1 <- scell_V1@meta.data$nFeature_RNA > featureMinThreshold_V1 & scell_V1@meta.data$nFeature_RNA < featureMaxThreshold_V1 & scell_V1@meta.data$percent.mt < mtThreshold_V1
+scell_V1$outliers_V1 <- outlier_list_V1=="FALSE"
+
+#generate QC graphs with cell outliers flagged in BLUE
+V1 <- VlnPlot(object = scell_V1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "outliers_V1", pt.size = 0.1 )
+plot1 <- FeatureScatter(object = scell_V1, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "outliers_V1",pt.size = 0.1) 
+plot2 <- FeatureScatter(object = scell_V1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "outliers_V1",pt.size = 0.1) 
+
+#filter cells that are outliers
+scell_V1 <- subset(x = scell_V1, subset = outliers_V1 =="FALSE")
+
+#regenerate QC graphs with cell outliers flagged in BLUE (should be none!)
+v2 <- VlnPlot(object = scell_V1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "outliers_V1", pt.size = 0.1 )
+plot3 <- FeatureScatter(object = scell_V1, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "outliers_V1", pt.size = 0.1) 
+plot4 <- FeatureScatter(object = scell_V1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "outliers_V1", pt.size = 0.1) 
+
+#QC graphs - TOP row before filtering outliers, bottom row after filtering
+CombinePlots(plots = list(V1, plot1,plot2, v2, plot3, plot4), ncol=3)
+V1 <- scell_V1
+```
+
+# scRNAseq Integration
+
+### Perform integration
+
+We then identify anchors using the `FindIntegrationAnchors()` function, which takes a list of seurat objects as input, and use these anchors to integrate the two dataset together with `integrateData()`
+
+```{r}
+##############################################################################
+##Identify cell types that are present in both datasets
+V1$cell <- "hCSC"
+dim(V1)
+H9$cell <- "hPSC"
+dim(H9)
+
+#Normalized and identify variable features for each dataset independently. 1) NormalizeData is used to normalize the scRNA-seq data. This step helps to remove technical variability and biases in the data, and to correct for differences in sequencing depth between cells. 
+scell.NormalizeData <- lapply(X = list(H9, V1), FUN = function(X) {
+  X <- NormalizeData(X)
+  X <- FindVariableFeatures(X, selection.method="vst", nfeature = 2000)
+})
+
+#select features that are repeatedly variable across datasets for integration. This function helps choose a subset of genes from the scRNAseq data to be used as "features" in downstream analysis. This step is typically performed after integration of multiple datasets or after normalization of the data.
+features.NormalizeData <- SelectIntegrationFeatures(object.list = scell.NormalizeData)
+
+#FindIntegrationAnchors is a function that helps align different single-cell datasets generated from different platforms or different experimental conditions. The goal is to identify gene expression markers that are consistent across the different datasets and can be used as "anchors" to integrate the data.
+scell.anchors_NormalizeData <- FindIntegrationAnchors(object.list = scell.NormalizeData, anchor.features = features.NormalizeData)
+
+# this commend creates an 'integrated data assay'. Integrate two scRNAseq datasets (H9 and V1) into a single combined dataset. the argument "anchorset" is the input to the function and it specifies the dataset that will serve as anchor for the integration process. 
+scell.combined_NormalizeData <- IntegrateData(anchorset = scell.anchors_NormalizeData)
+
+##############################################################################
+#Specify that we will perform downstream analysis on the corrected data not that the original
+#unmodified data still resides in the "RNA" assay
+DefaultAssay(scell.combined_NormalizeData) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+set.seed(123)
+scell.combined_NormalizeData <- ScaleData(scell.combined_NormalizeData,verbose = FALSE)
+scell.combined_NormalizeData <- RunPCA(scell.combined_NormalizeData, npcs = 30, verbose = FALSE)
+scell.combined_NormalizeData <- RunUMAP(scell.combined_NormalizeData, reduction = "pca", dims = 1:20)
+scell.combined_NormalizeData <- RunTSNE(scell.combined_NormalizeData, reduction = "pca", dims = 1:20)
+scell.combined_NormalizeData <- FindNeighbors(scell.combined_NormalizeData, reduction = "pca", dims = 1:20)
+scell.combined_NormalizeData <- FindClusters(scell.combined_NormalizeData, resolution = 0.5)
+DefaultAssay(scell.combined_NormalizeData) <- "RNA"
+```
+
+```{r}
+#UMAP Plot
+#UMAP Plot _ NormalizeData
+p1 <- DimPlot(scell.combined_NormalizeData, reduction = "umap", seed = 123,group.by = "cell", cols = c('hPSC' = '#B385FF', 'hCSC' = '#64B200'))
+p2 <- DimPlot(scell.combined_NormalizeData, reduction = "umap", seed = 123,group.by = "seurat_clusters", label = TRUE,
+              repel = TRUE)
+plot(p1+p2)
+```
+
+```{r}
+#TSNE plot
+p3 <- DimPlot(scell.combined_NormalizeData, reduction = "tsne", pt.size = 0.1,group.by = "cell",cols = c('hPSC' = 'coral1', 'hCSC' = 'palegreen4'))
+p4 <- DimPlot(scell.combined_NormalizeData, reduction = "tsne",pt.size = 0.1, label = TRUE, repel = TRUE)
+p3 + p4
+```
+
+```{r}
+#PCA plot
+p5 <- DimPlot(scell.combined_NormalizeData, reduction = "pca", pt.size = 0.5,group.by = "cell")
+p6 <- DimPlot(scell.combined_NormalizeData, reduction = "pca",pt.size = 0.5, label = TRUE, repel = TRUE)
+p5 + p6
+```
+
+## Identify conserved cell type markers
+
+```{r}
+#Read ".csv" files that contain list of genes to be analyzed.
+gene_inactive_1 = readLines("../inactive_genes_1.csv")
+gene_inactive_2 = readLines("../inactive_genes_2.csv") 
+gene_active_1 = readLines("../active_genes_1.csv")
+gene_active_2 = readLines("../active_genes_2.csv") 
+gene_selective_1 = readLines("../selective_genes_1.csv") 
+gene_selective_2 = readLines("../selective_genes_2.csv") 
+
+
+```
+
+### Violin Plot
+
+Violin plot is used to visualize the distribution of gene expression values across cells for a particular gene or set of genes. The expression value that is plotted is typically the normalized count of RNA molecules for each gene in each cell.
+
+Here I created a new function called `Vlnplot4` which plots violin plots without the "identify" label in x-axis AND show dots in the vln plots.
+
+```{r}
+#vlnplot4 function
+vlnplot4 <- function(object, feature, groupname){
+  plots <- VlnPlot(object, features = feature, split.by = groupname, group.by = groupname,pt.size = 0.3, combine = FALSE)
+  plots1 <- list()
+  for (i in seq_along(plots)){
+    #Change x and y tick label font size.
+    plots1[[i]] = plots[[i]] + 
+      theme(axis.title.x = element_blank())+ 
+      theme(plot.title=element_text(size = 10))+
+      theme(axis.title.y = element_text(size = 12))+
+      theme(axis.text.x = element_text(size = 0)) +
+      scale_fill_manual(values=c("#64B200", "#B385FF"))
+  }
+  return(plots1)
+}
+
+plot_gene_1 = vlnplot4(scell.combined_NormalizeData, "POU5F1","cell")
+wrap_plots(plots = plot_gene_1, ncol=1)
+
+plot_gene_1 = vlnplot4(scell.combined_NormalizeData, gene_inactive_1, "cell")
+plot_gene_2 = vlnplot4(scell.combined_NormalizeData, gene_inactive_2, "cell")
+plot_gene_3 = vlnplot4(scell.combined_NormalizeData, gene_active_1, "cell")
+plot_gene_4 = vlnplot4(scell.combined_NormalizeData, gene_active_2, "cell")
+plot_gene_5 = vlnplot4(scell.combined_NormalizeData, gene_selective_1, "cell")
+plot_gene_6 = vlnplot4(scell.combined_NormalizeData, gene_selective_2, "cell")
+
+#vlnplot_inactive1_Sept2022
+wrap_plots(plots = plot_gene_1, ncol = 4)
+wrap_plots(plots = plot_gene_2, ncol = 4)
+wrap_plots(plots = plot_gene_3, ncol = 4)
+wrap_plots(plots = plot_gene_4, ncol = 4)
+wrap_plots(plots = plot_gene_5, ncol = 4)
+wrap_plots(plots = plot_gene_6, ncol = 4)
+
+```
+
+### UMAP Plots
+
+umap is a dimension reduction algorithm used for visualizing high-dimensional data in a low dimensional space. Here, umap plots are used to visualize the expression patterns of genes across a large number of individual cells. This allows visualization of the expression patterns of genes across a large number of individual cells in a two-dimensional scatterplot that can be easily interpreted.
+
+```{r}
+#UMAP
+umap_plot <- function(object, feature, groupname){
+  #Inactive vlnPlot
+  plots <- FeaturePlot(object, features = feature, 
+                   pt.size = 0, combine = FALSE)
+  plots1 <- list()
+  for (i in seq_along(plots)){
+    #Change x and y tick label font size.
+    plots1[[i]] = plots[[i]] + 
+      theme(plot.title=element_text(size = 10))+
+      theme(axis.title.y = element_text(size = 10))+
+      theme(axis.title.x = element_text(size = 10))+
+      theme(axis.text.x = element_text(size = 10))+
+      theme(axis.text.y = element_text(size = 10))
+  }
+  return(plots1)
+}
+
+#inactive 1
+plot_umap_1= umap_plot(scell.combined_NormalizeData, gene_inactive_1)
+wrap_plots(plots = plot_umap_1, ncol=4)
+#inactivr_2
+plot_umap_2= umap_plot(scell.combined_NormalizeData, gene_inactive_2)
+wrap_plots(plots = plot_umap_2, ncol=4)
+#active_1
+plot_umap_3= umap_plot(scell.combined_NormalizeData, gene_active_1)
+wrap_plots(plots = plot_umap_3, ncol=4)
+#active_2
+plot_umap_4= umap_plot(scell.combined_NormalizeData, gene_active_2)
+wrap_plots(plots = plot_umap_4, ncol=4)
+#selective_1
+plot_umap_5= umap_plot(scell.combined_NormalizeData, gene_selective_1)
+wrap_plots(plots = plot_umap_5, ncol=4)
+#selective_2
+plot_umap_6= umap_plot(scell.combined_NormalizeData, gene_selective_2)
+wrap_plots(plots = plot_umap_6, ncol=4)
+
+```
